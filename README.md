@@ -20,13 +20,11 @@ It creates an isolated network environment where the only exit path is through t
 
 ## Installation
 
-1. **Configure Tor**: Edit `/etc/tor/torrc` to include the following lines:
+1. **Configure Tor**: run `/scripts/installer.sh`
 ```shell
-TransPort 0.0.0.0:9040
-DNSPort 0.0.0.0:9053
-VirtualAddrNetworkIPv4 10.192.0.0/10
-AutomapHostsOnResolve 1
+sudo ./scripts/installer.sh
 ```
+- the argument in the above is `debian` - that's the name of the user whose .bashrc will be updated to contain the GOROOT variable 
 
 *Note: We bind to 0.0.0.0 or ensure the Tor daemon can accept connections from the virtual interfaces created by Toralizer.*
 
