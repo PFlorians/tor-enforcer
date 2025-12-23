@@ -15,6 +15,22 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_err() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# 0. Read username argument
+TARGET_USER="${1:-root}"
+
+if [ "$TARGET_USER" != "root" ] && ! id "$TARGET_USER" &>/dev/null; then
+    log_err "User '$TARGET_USER' does not exist."
+    exit 1
+fi
+
+if [ "$TARGET_USER" = "root" ]; then
+    BASHRC="/root/.bashrc"
+else
+    BASHRC="/home/$TARGET_USER/.bashrc"
+fi
+
+log_info "Using user: $TARGET_USER"
+
 # 1. Check Root
 if [ "$EUID" -ne 0 ]; then
     log_err "This script must be run as root."
@@ -29,8 +45,20 @@ log_info "Installing dependencies (tor, nftables, iproute2, golang, curl)..."
 apt-get install -y tor nftables iproute2 curl
 
 log_info "Downloading go"
-mkdir tmp && cd ./tmp && wget https://go.dev/dl/go1.25.5.linux-amd64.tar.gz && tar -C /usr/local -xzf go1.25.5.linux-amd64.tar.gz && cd ..
-export GOROOT=/usr/local/go/bin
+mkdir -p tmp
+cd tmp
+wget https://go.dev/dl/go1.25.5.linux-amd64.tar.gz
+tar -C /usr/local -xzf go1.25.5.linux-amd64.tar.gz
+cd ..
+rm -rf tmp
+
+if ! grep -q "GOROOT=/usr/local/go/bin" "$BASHRC"; then
+    echo 'export GOROOT=/usr/local/go/bin' >> "$BASHRC"
+    log_info "Added GOROOT to $BASHRC"
+else
+    log_warn "GOROOT already present in $BASHRC"
+fi
+
 
 # 3. Configure Tor
 TORRC="/etc/tor/torrc"
@@ -100,5 +128,9 @@ else
     exit 1
 fi
 
-log_info "Installation complete! You can now compile and run Toralizer."
-log_info "Run: go build -o toralizer toralizer.go"
+log_info "Installation complete! building Toralizer."
+#log_info "Run: go build -o toralizer toralizer.go"
+cd ./src
+sudo -u "$TARGET_USER" env HOME="$(eval echo ~$TARGET_USER)" /usr/local/go/bin/go build -o ../bin/toralizer toralizer.go
+log_info "Build finished, executable is at ../bin/toralizer"
+log_info "You should now run the /scripts/setup.sh"
