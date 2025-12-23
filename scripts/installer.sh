@@ -15,6 +15,29 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_err() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Determine absolute path of the script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Project layout (assumes install_env.sh lives in /scripts)
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPTS_DIR="$PROJECT_ROOT/scripts"
+SRC_DIR="$PROJECT_ROOT/src"
+BIN_DIR="$PROJECT_ROOT/bin"
+
+if [ ! -d "$SRC_DIR" ]; then
+    log_err "Source directory not found: $SRC_DIR"
+    exit 1
+fi
+
+if [ ! -f "$SRC_DIR/toralizer.go" ]; then
+    log_err "toralizer.go not found in $SRC_DIR"
+    exit 1
+fi
+
+log_info "Script directory : $SCRIPT_DIR"
+log_info "Project root    : $PROJECT_ROOT"
+
+
 # 0. Read username argument
 TARGET_USER="${1:-root}"
 
@@ -130,7 +153,13 @@ fi
 
 log_info "Installation complete! building Toralizer."
 #log_info "Run: go build -o toralizer toralizer.go"
-cd ./src
-sudo -u "$TARGET_USER" env HOME="$(eval echo ~$TARGET_USER)" /usr/local/go/bin/go build -o ../bin/toralizer toralizer.go
-log_info "Build finished, executable is at ../bin/toralizer"
-log_info "You should now run the /scripts/setup.sh"
+mkdir -p "$BIN_DIR"
+
+sudo -u "$TARGET_USER" \
+    env HOME="$(eval echo ~$TARGET_USER)" \
+    /usr/local/go/bin/go build \
+    -o "$BIN_DIR/toralizer" \
+    "$SRC_DIR/toralizer.go"
+
+log_info "Build finished, executable is at $BIN_DIR/toralizer"
+log_info "You should now run: $SCRIPTS_DIR/setup.sh"
