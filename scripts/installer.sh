@@ -30,8 +30,7 @@ apt-get install -y tor nftables iproute2 curl
 
 log_info "Downloading go"
 mkdir tmp && cd ./tmp && wget https://go.dev/dl/go1.25.5.linux-amd64.tar.gz && tar -C /usr/local -xzf go1.25.5.linux-amd64.tar.gz && cd ..
-echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
-source ~/.bashrc
+export GOROOT=/usr/local/go/bin
 
 # 3. Configure Tor
 TORRC="/etc/tor/torrc"
