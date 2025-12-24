@@ -157,6 +157,7 @@ func NewSandbox(cfg Config) (*Sandbox, error) {
 // SetupNetwork builds the veth pair and configures IP routing
 func (s *Sandbox) SetupNetwork() error {
 	// 1. Create Network Namespace
+	log.Printf("Tor network ns: %s", s.Namespace)
 	if err := runCmd("ip", "netns", "add", s.Namespace); err != nil {
 		return fmt.Errorf("creating netns: %w", err)
 	}
