@@ -7,15 +7,16 @@ curl: (6) Could not resolve host: check.torproject.org
 
 
 
-2025/12/24 01:08:32 Creating Network Namespace: tor-ns-e3dd82c6
-2025/12/24 01:08:32 Applying fail-closed Tor firewall rules...
-2025/12/24 01:08:32 Executing: dig [google.com]
-2025/12/24 01:08:32 ---------------------------------------------------
-;; communications error to 192.168.1.1#53: timed out
-;; communications error to 192.168.1.1#53: timed out
-;; communications error to 192.168.1.1#53: timed out
+2025/12/24 11:54:40 Creating Network Namespace: tor-ns-e823c4bb
+2025/12/24 11:54:40 Applying fail-closed Tor firewall rules...
+2025/12/24 11:54:40 Executing: dig [https://check.torproject.org]
+2025/12/24 11:54:40 ---------------------------------------------------
+;; communications error to 127.0.0.1#53: connection refused
+;; communications error to 127.0.0.1#53: connection refused
+;; communications error to 127.0.0.1#53: connection refused
 
-; <<>> DiG 9.18.41-1~deb12u1-Debian <<>> google.com
+; <<>> DiG 9.18.41-1~deb12u1-Debian <<>> https://check.torproject.org
 ;; global options: +cmd
 ;; no servers could be reached
-2025/12/24 01:08:47 Execution finished with error: exit status 9
+2025/12/24 11:54:40 Execution finished with error: exit status 9
+
