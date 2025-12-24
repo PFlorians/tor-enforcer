@@ -1,36 +1,48 @@
-2025/12/24 01:06:54 Creating Network Namespace: tor-ns-61254073
-2025/12/24 01:06:55 Applying fail-closed Tor firewall rules...
-2025/12/24 01:06:55 Executing: curl [https://check.torproject.org/api/ip]
-2025/12/24 01:06:55 ---------------------------------------------------
-curl: (6) Could not resolve host: check.torproject.org
-2025/12/24 01:07:15 Execution finished with error: exit status 6
+sudo tcpdump -ni veth-h-9e076eee tcp port 53
 
-
-
-2025/12/24 11:54:40 Creating Network Namespace: tor-ns-e823c4bb
-2025/12/24 11:54:40 Applying fail-closed Tor firewall rules...
-2025/12/24 11:54:40 Executing: dig [https://check.torproject.org]
-2025/12/24 11:54:40 ---------------------------------------------------
-;; communications error to 127.0.0.1#53: connection refused
-;; communications error to 127.0.0.1#53: connection refused
-;; communications error to 127.0.0.1#53: connection refused
-
-; <<>> DiG 9.18.41-1~deb12u1-Debian <<>> https://check.torproject.org
-;; global options: +cmd
-;; no servers could be reached
-2025/12/24 11:54:40 Execution finished with error: exit status 9
-
-sudo ip netns exec tor-ns-7e80b10e tcpdump -ni any udp port 53
-
-tcpdump: data link type LINUX_SLL2
 tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
-listening on any, link-type LINUX_SLL2 (Linux cooked v2), snapshot length 262144 bytes
-^C12:48:06.281336 lo    In  IP 127.0.0.1.50123 > 127.0.0.1.53: 60621+ [1au] A? check.torproject.org. (49)
-12:48:06.281346 lo    In  IP 127.0.0.1.50123 > 127.0.0.1.53: 41678+ [1au] AAAA? check.torproject.org. (49)
-12:48:06.281358 lo    In  IP 127.0.0.1.34478 > 127.0.0.1.53: 60621+ [1au] A? check.torproject.org. (49)
-12:48:06.281362 lo    In  IP 127.0.0.1.34478 > 127.0.0.1.53: 41678+ [1au] AAAA? check.torproject.org. (49)
-
-4 packets captured
-8 packets received by filter
+listening on veth-h-9e076eee, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+13:48:07.009924 IP 10.200.0.2.47130 > 8.8.8.8.53: Flags [S], seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342784265 ecr 0,nop,wscale 7], length 0
+13:48:08.039121 IP 10.200.0.2.47130 > 8.8.8.8.53: Flags [S], seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342785294 ecr 0,nop,wscale 7], length 0
+13:48:10.051664 IP 10.200.0.2.47130 > 8.8.8.8.53: Flags [S], seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342787307 ecr 0,nop,wscale 7], length 0
+13:48:14.243832 IP 10.200.0.2.47130 > 8.8.8.8.53: Flags [S], seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342791499 ecr 0,nop,wscale 7], length 0
+13:48:22.435688 IP 10.200.0.2.47130 > 8.8.8.8.53: Flags [S], seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342799691 ecr 0,nop,wscale 7], length 0
+13:48:38.563905 IP 10.200.0.2.47130 > 8.8.8.8.53: Flags [S], seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342815819 ecr 0,nop,wscale 7], length 0
+13:49:12.611710 IP 10.200.0.2.47130 > 8.8.8.8.53: Flags [S], seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342849867 ecr 0,nop,wscale 7], length 0
+^C
+7 packets captured
+7 packets received by filter
 0 packets dropped by kernel
 
+
+sudo ip netns exec tor-ns-9e076eee tcpdump -v -ni any tcp port 53
+
+tcpdump: data link type LINUX_SLL2
+tcpdump: listening on any, link-type LINUX_SLL2 (Linux cooked v2), snapshot length 262144 bytes
+^C13:48:07.009922 veth-p-9e076eee Out IP (tos 0x0, ttl 64, id 59503, offset 0, flags [DF], proto TCP (6), length 60)
+    10.200.0.2.47130 > 8.8.8.8.53: Flags [S], cksum 0x1b08 (incorrect -> 0x4fd2), seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342784265 ecr 0,nop,wscale 7], length 0
+13:48:08.039090 veth-p-9e076eee Out IP (tos 0x0, ttl 64, id 59504, offset 0, flags [DF], proto TCP (6), length 60)
+    10.200.0.2.47130 > 8.8.8.8.53: Flags [S], cksum 0x1b08 (incorrect -> 0x4bcd), seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342785294 ecr 0,nop,wscale 7], length 0
+13:48:10.051647 veth-p-9e076eee Out IP (tos 0x0, ttl 64, id 59505, offset 0, flags [DF], proto TCP (6), length 60)
+    10.200.0.2.47130 > 8.8.8.8.53: Flags [S], cksum 0x1b08 (incorrect -> 0x43f0), seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342787307 ecr 0,nop,wscale 7], length 0
+13:48:14.243813 veth-p-9e076eee Out IP (tos 0x0, ttl 64, id 59506, offset 0, flags [DF], proto TCP (6), length 60)
+    10.200.0.2.47130 > 8.8.8.8.53: Flags [S], cksum 0x1b08 (incorrect -> 0x3390), seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342791499 ecr 0,nop,wscale 7], length 0
+13:48:22.435668 veth-p-9e076eee Out IP (tos 0x0, ttl 64, id 59507, offset 0, flags [DF], proto TCP (6), length 60)
+    10.200.0.2.47130 > 8.8.8.8.53: Flags [S], cksum 0x1b08 (incorrect -> 0x1390), seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342799691 ecr 0,nop,wscale 7], length 0
+13:48:38.563868 veth-p-9e076eee Out IP (tos 0x0, ttl 64, id 59508, offset 0, flags [DF], proto TCP (6), length 60)
+    10.200.0.2.47130 > 8.8.8.8.53: Flags [S], cksum 0x1b08 (incorrect -> 0xd48f), seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342815819 ecr 0,nop,wscale 7], length 0
+13:49:12.611666 veth-p-9e076eee Out IP (tos 0x0, ttl 64, id 59509, offset 0, flags [DF], proto TCP (6), length 60)
+    10.200.0.2.47130 > 8.8.8.8.53: Flags [S], cksum 0x1b08 (incorrect -> 0x4f8f), seq 422998677, win 64240, options [mss 1460,sackOK,TS val 3342849867 ecr 0,nop,wscale 7], length 0
+
+7 packets captured
+7 packets received by filter
+0 packets dropped by kernel
+
+
+sudo tcpdump -v -ni lo tcp port 9053
+
+tcpdump: listening on lo, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+^C
+0 packets captured
+4 packets received by filter
+0 packets dropped by kernel
