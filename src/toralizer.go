@@ -16,8 +16,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Config holds the configuration for the sandbox
@@ -152,7 +154,6 @@ func NewSandbox(cfg Config) (*Sandbox, error) {
 }
 
 // SetupNetwork builds the veth pair and configures IP routing
-// Uses direct 'ip' commands for reliability over complex netlink libraries in a single-file implementation.
 func (s *Sandbox) SetupNetwork() error {
 	// 1. Create Network Namespace
 	if err := runCmd("ip", "netns", "add", s.Namespace); err != nil {
@@ -177,6 +178,14 @@ func (s *Sandbox) SetupNetwork() error {
 		return fmt.Errorf("setting host interface up: %w", err)
 	}
 
+	// --- CRITICAL FIX: Enable route_localnet ---
+	// This allows the kernel to route traffic from the veth interface to 127.0.0.1 (Tor)
+	// Without this, packets redirected to localhost from an external interface are dropped (Martian packets).
+	sysctlPath := fmt.Sprintf("net.ipv4.conf.%s.route_localnet", s.VethHost)
+	if err := runCmd("sysctl", "-w", fmt.Sprintf("%s=1", sysctlPath)); err != nil {
+		return fmt.Errorf("enabling route_localnet: %w", err)
+	}
+
 	// 5. Configure Namespace Interface (requires executing inside netns)
 	// Enable loopback in NS
 	if err := runCmd("ip", "netns", "exec", s.Namespace, "ip", "link", "set", "lo", "up"); err != nil {
@@ -196,32 +205,39 @@ func (s *Sandbox) SetupNetwork() error {
 		return fmt.Errorf("setting default route in ns: %w", err)
 	}
 
-	// 6. Enable Forwarding on Host for this specific interface (if global forwarding is off, though usually handled globally)
-	// We rely on global `net.ipv4.ip_forward=1` checked in setup_check.sh
+	// 6. Setup DNS Overlay
+	// 'ip netns exec' will automatically bind mount /etc/netns/<NAME>/resolv.conf over /etc/resolv.conf
+	// This ensures the container uses a DNS server we can intercept (the Gateway), and not a host loopback (127.0.0.53).
+	netnsDir := fmt.Sprintf("/etc/netns/%s", s.Namespace)
+	if err := os.MkdirAll(netnsDir, 0755); err != nil {
+		return fmt.Errorf("creating netns config dir: %w", err)
+	}
+	
+	// We point DNS to the Gateway IP. The Firewall will catch this UDP 53 traffic and redirect to Tor.
+	// This prevents apps from trying to hit 127.0.0.53 (systemd-resolved) which would fail inside the netns.
+	resolvConf := fmt.Sprintf("nameserver %s\n", gwIP)
+	if err := os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644); err != nil {
+		return fmt.Errorf("writing ns resolv.conf: %w", err)
+	}
 
 	return nil
 }
 
 // ApplyFirewall configures nftables on the HOST to intercept traffic from the namespace
 func (s *Sandbox) ApplyFirewall() error {
-	// We use a dedicated table for Toralizer
 	tableName := "toralizer"
 	
-	// Create table
 	if err := runCmd("nft", "add", "table", "inet", tableName); err != nil {
 		return fmt.Errorf("creating nft table: %w", err)
 	}
 
-	// Create PREROUTING chain
-	// This hook catches traffic coming FROM the namespace (entering the host via veth-host)
-	// Priority -100 ensures it runs before standard routing decisions
 	chainName := fmt.Sprintf("chain-%s", s.ID)
+	// Prerouting hook with priority -100 (destnat)
 	if err := runCmd("nft", "add", "chain", "inet", tableName, chainName, "{ type nat hook prerouting priority -100; }"); err != nil {
 		return fmt.Errorf("creating nft chain: %w", err)
 	}
 
 	// RULE 1: Redirect DNS (UDP 53) to Tor DNSPort
-	// Matches only traffic coming from our specific host veth interface
 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainName, 
 		"iifname", s.VethHost, "udp", "dport", "53", "redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort)); err != nil {
 		return fmt.Errorf("adding dns redirect rule: %w", err)
@@ -234,7 +250,6 @@ func (s *Sandbox) ApplyFirewall() error {
 	}
 
 	// RULE 3: DROP everything else from this interface
-	// This ensures fail-closed behavior. No ICMP, no UDP leaks, no nothing else.
 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainName, 
 		"iifname", s.VethHost, "drop"); err != nil {
 		return fmt.Errorf("adding drop rule: %w", err)
@@ -243,32 +258,19 @@ func (s *Sandbox) ApplyFirewall() error {
 	return nil
 }
 
-// Run executes the command inside the namespace using 'nsenter'
-// This is more robust than Go's syscall.Setns for multi-threaded programs (like Go itself)
-// when launching external processes.
+// Run executes the command inside the namespace using 'ip netns exec'
+// We switched from 'nsenter' to 'ip netns exec' because the latter automatically handles
+// the /etc/netns/<NAME>/resolv.conf bind mount, which is crucial for fixing DNS.
 func (s *Sandbox) Run(bin string, args []string) error {
-	// Look up binary path
-	binPath, err := exec.LookPath(bin)
-	if err != nil {
-		return fmt.Errorf("binary not found: %w", err)
-	}
+	// Prepare params
+	cmdParams := []string{"netns", "exec", s.Namespace, bin}
+	cmdParams = append(cmdParams, args...)
 
-	// Prepare nsenter arguments
-	// --net: Join network namespace
-	// --preserve-credentials: Keep root (or we could drop to user, but let's stay root inside NS for now as requested)
-	nsParams := []string{
-		"--net=/var/run/netns/" + s.Namespace,
-		"--preserve-credentials", 
-		binPath,
-	}
-	nsParams = append(nsParams, args...)
-
-	cmd := exec.Command("nsenter", nsParams...)
+	cmd := exec.Command("ip", cmdParams...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Set environment variables if needed
 	cmd.Env = os.Environ()
 
 	return cmd.Run()
@@ -281,27 +283,26 @@ func (s *Sandbox) Teardown() {
 	}
 
 	// 1. Delete Network Namespace
-	// This automatically removes the veth interfaces associated with it
 	if err := runCmd("ip", "netns", "del", s.Namespace); err != nil {
-		// Just log error, don't stop
 		log.Printf("Warning: failed to delete netns: %v", err)
 	}
 
-	// 2. Remove NFTables Chain
-	// We remove the specific chain for this ID to avoid disturbing other running sandboxes
-	// If we were the only one, we could delete the table, but granular is better.
+	// 2. Remove Netns Config Dir
+	if err := os.RemoveAll(fmt.Sprintf("/etc/netns/%s", s.Namespace)); err != nil {
+		log.Printf("Warning: failed to remove netns config: %v", err)
+	}
+
+	// 3. Remove NFTables Chain
 	tableName := "toralizer"
 	chainName := fmt.Sprintf("chain-%s", s.ID)
-	
-	// Attempt to delete chain (and its rules)
-	// Note: In nftables, you usually flush chain then delete chain, 
-	// or delete table if it's the last one. 
-	// For simplicity in this assignment, we leave the table structure but clear the chain.
 	exec.Command("nft", "delete", "chain", "inet", tableName, chainName).Run()
 }
 
-// Helper to run shell commands
 func runCmd(name string, args ...string) error {
+	// Adding a small sleep to avoid race conditions on slower systems during interface creation
+	if name == "sysctl" {
+		time.Sleep(100 * time.Millisecond)
+	}
 	cmd := exec.Command(name, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s failed: %v, output: %s", name, err, string(out))
