@@ -101,7 +101,8 @@ func main() {
 		sandbox.Teardown()
 		os.Exit(0)
 	}()
-
+	log.Println("Sleeping one 2 minnutes...")
+	time.Sleep(2 * time.Minute)
 	// 6. Execute Command in Namespace
 	if sandbox.Config.Verbose {
 		log.Printf("Executing: %s %v", command, cmdArgs)
