@@ -8,6 +8,7 @@ Type: Network Namespace Isolation & Nftables Redirection
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -94,8 +95,6 @@ func main() {
 		sandbox.Teardown()
 		os.Exit(0)
 	}()
-	
-	time.Sleep(2 * time.Minute)
 
 	if sandbox.Config.Verbose {
 		log.Printf("Executing: %s %v", command, cmdArgs)
@@ -117,7 +116,7 @@ func NewSandbox(cfg Config) (*Sandbox, error) {
 	if _, err := rand.Read(randBytes); err != nil {
 		return nil, err
 	}
-	id := hex.EncodeToString(randBytes)
+	id := hex. hex.EncodeToString(randBytes)
 
 	baseIP, _, err := net.ParseCIDR(cfg.NetworkCIDR)
 	if err != nil {
@@ -165,7 +164,6 @@ func (s *Sandbox) SetupNetwork() error {
 	netnsDir := fmt.Sprintf("/etc/netns/%s", s.Namespace)
 	os.MkdirAll(netnsDir, 0755)
 	
-	// Set nameserver to the gateway (host IP) which will be intercepted by nftables
 	resolvConf := fmt.Sprintf("nameserver %s\n", gwIP)
 	os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644)
 
@@ -176,31 +174,29 @@ func (s *Sandbox) ApplyFirewall() error {
 	tableName := "toralizer"
 	runCmd("nft", "add", "table", "inet", tableName)
 
+	// --- NAT: Redirection Logic ---
 	chainPre := fmt.Sprintf("pre-%s", s.ID)
 	runCmd("nft", "add", "chain", "inet", tableName, chainPre, "{ type nat hook prerouting priority -100; }")
 	
-	// DNAT addresses
 	destTorDNS := fmt.Sprintf("127.0.0.1:%d", s.Config.TorDNSPort)
 	destTorTrans := fmt.Sprintf("127.0.0.1:%d", s.Config.TorTransPort)
 
-	// DNS: Intercept both UDP (standard) and TCP (fallback)
 	runCmd("nft", "add", "rule", "inet", tableName, chainPre, "iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", destTorDNS)
 	runCmd("nft", "add", "rule", "inet", tableName, chainPre, "iifname", s.VethHost, "tcp", "dport", "53", "dnat", "ip", "to", destTorDNS)
-	
-	// All other TCP traffic -> Tor Transparent Proxy
 	runCmd("nft", "add", "rule", "inet", tableName, chainPre, "iifname", s.VethHost, "meta", "l4proto", "tcp", "dnat", "ip", "to", destTorTrans)
-	
-	// Fail-closed: Drop everything else (UDP that isn't DNS, ICMP, etc.)
 	runCmd("nft", "add", "rule", "inet", tableName, chainPre, "iifname", s.VethHost, "drop")
 
-	// INPUT chain: Critical for allowing the DNATed traffic to reach local services (Tor)
+	// --- MANGLE: Fix Checksums ---
+	// This is critical because veth-to-lo transitions often fail due to "incorrect" checksums 
+	// identified by your tcpdump. Zeroing them out forces the stack to ignore the error.
+	chainMangle := fmt.Sprintf("mangle-%s", s.ID)
+	runCmd("nft", "add", "chain", "inet", tableName, chainMangle, "{ type filter hook prerouting priority -150; }")
+	runCmd("nft", "add", "rule", "inet", tableName, chainMangle, "iifname", s.VethHost, "udp", "dport", "53", "udp", "checksum", "set", "0")
+
+	// --- FILTER: Input Acceptance ---
 	chainIn := fmt.Sprintf("in-%s", s.ID)
 	runCmd("nft", "add", "chain", "inet", tableName, chainIn, "{ type filter hook input priority -50; }")
-	
-	// Explicitly accept traffic from the namespace arriving at the host
 	runCmd("nft", "add", "rule", "inet", tableName, chainIn, "iifname", s.VethHost, "accept")
-	
-	// Explicitly accept the loopback traffic resulting from DNAT
 	runCmd("nft", "add", "rule", "inet", tableName, chainIn, "iifname", "lo", "udp", "dport", fmt.Sprintf("%d", s.Config.TorDNSPort), "accept")
 	runCmd("nft", "add", "rule", "inet", tableName, chainIn, "iifname", "lo", "tcp", "dport", fmt.Sprintf("%d", s.Config.TorTransPort), "accept")
 
