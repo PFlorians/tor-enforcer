@@ -8,7 +8,6 @@ Type: Network Namespace Isolation & Nftables Redirection
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -95,6 +94,8 @@ func main() {
 		sandbox.Teardown()
 		os.Exit(0)
 	}()
+	
+	time.Sleep(2 * time.Minute)
 
 	if sandbox.Config.Verbose {
 		log.Printf("Executing: %s %v", command, cmdArgs)
@@ -116,7 +117,7 @@ func NewSandbox(cfg Config) (*Sandbox, error) {
 	if _, err := rand.Read(randBytes); err != nil {
 		return nil, err
 	}
-	id := hex. hex.EncodeToString(randBytes)
+	id := hex.EncodeToString(randBytes)
 
 	baseIP, _, err := net.ParseCIDR(cfg.NetworkCIDR)
 	if err != nil {
@@ -164,6 +165,7 @@ func (s *Sandbox) SetupNetwork() error {
 	netnsDir := fmt.Sprintf("/etc/netns/%s", s.Namespace)
 	os.MkdirAll(netnsDir, 0755)
 	
+	// Set nameserver to the gateway (host IP) which will be intercepted by nftables
 	resolvConf := fmt.Sprintf("nameserver %s\n", gwIP)
 	os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644)
 
@@ -202,7 +204,6 @@ func (s *Sandbox) ApplyFirewall() error {
 
 	return nil
 }
-
 func (s *Sandbox) Run(bin string, args []string) error {
 	cmdParams := []string{"netns", "exec", s.Namespace, bin}
 	cmdParams = append(cmdParams, args...)
