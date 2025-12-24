@@ -176,6 +176,12 @@ func (s *Sandbox) ApplyFirewall() error {
 	tableName := "toralizer"
 	runCmd("nft", "add", "table", "inet", tableName)
 
+	// --- MANGLE: Neutralize Checksums ---
+	// Doing this first in the prerouting hook at very high priority.
+	chainMangle := fmt.Sprintf("mangle-%s", s.ID)
+	runCmd("nft", "add", "chain", "inet", tableName, chainMangle, "{ type filter hook prerouting priority -150; }")
+	runCmd("nft", "add", "rule", "inet", tableName, chainMangle, "iifname", s.VethHost, "udp", "dport", "53", "udp", "checksum", "set", "0")
+
 	// --- NAT: Redirection Logic ---
 	chainPre := fmt.Sprintf("pre-%s", s.ID)
 	runCmd("nft", "add", "chain", "inet", tableName, chainPre, "{ type nat hook prerouting priority -100; }")
@@ -188,22 +194,16 @@ func (s *Sandbox) ApplyFirewall() error {
 	runCmd("nft", "add", "rule", "inet", tableName, chainPre, "iifname", s.VethHost, "meta", "l4proto", "tcp", "dnat", "ip", "to", destTorTrans)
 	runCmd("nft", "add", "rule", "inet", tableName, chainPre, "iifname", s.VethHost, "drop")
 
-	// --- MANGLE: Fix Checksums ---
-	// This is critical because veth-to-lo transitions often fail due to "incorrect" checksums 
-	// identified by your tcpdump. Zeroing them out forces the stack to ignore the error.
-	chainMangle := fmt.Sprintf("mangle-%s", s.ID)
-	runCmd("nft", "add", "chain", "inet", tableName, chainMangle, "{ type filter hook prerouting priority -150; }")
-	runCmd("nft", "add", "rule", "inet", tableName, chainMangle, "iifname", s.VethHost, "udp", "dport", "53", "udp", "checksum", "set", "0")
-
 	// --- FILTER: Input Acceptance ---
+	// We must accept the packet both as it enters the host (veth) and as it is delivered (lo).
 	chainIn := fmt.Sprintf("in-%s", s.ID)
 	runCmd("nft", "add", "chain", "inet", tableName, chainIn, "{ type filter hook input priority -50; }")
 	runCmd("nft", "add", "rule", "inet", tableName, chainIn, "iifname", s.VethHost, "accept")
-	runCmd("nft", "add", "rule", "inet", tableName, chainIn, "iifname", "lo", "udp", "dport", fmt.Sprintf("%d", s.Config.TorDNSPort), "accept")
-	runCmd("nft", "add", "rule", "inet", tableName, chainIn, "iifname", "lo", "tcp", "dport", fmt.Sprintf("%d", s.Config.TorTransPort), "accept")
+	runCmd("nft", "add", "rule", "inet", tableName, chainIn, "iifname", "lo", "accept")
 
 	return nil
 }
+
 func (s *Sandbox) Run(bin string, args []string) error {
 	cmdParams := []string{"netns", "exec", s.Namespace, bin}
 	cmdParams = append(cmdParams, args...)
