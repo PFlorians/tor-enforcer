@@ -137,7 +137,7 @@ func NewSandbox(cfg Config) (*Sandbox, error) {
 	if ip4 == nil {
 		return nil, errors.New("IPv6 not supported in this version")
 	}
-	
+
 	// Increment last octet
 	ipHost := net.IPv4(ip4[0], ip4[1], ip4[2], ip4[3]+1).String()
 	ipPeer := net.IPv4(ip4[0], ip4[1], ip4[2], ip4[3]+2).String()
@@ -194,7 +194,7 @@ func (s *Sandbox) SetupNetwork() error {
 	if err := runCmd("sysctl", "-w", fmt.Sprintf("%s=0", sysctlRpFilter)); err != nil {
 		return fmt.Errorf("disabling rp_filter: %w", err)
 	}
-	
+
 	// Fix C: Disable Checksum Offloading on HOST side
 	// Veth packets often have partial checksums which cause drops when redirected to loopback
 	exec.Command("ethtool", "-K", s.VethHost, "tx", "off", "rx", "off").Run()
@@ -212,7 +212,7 @@ func (s *Sandbox) SetupNetwork() error {
 	if err := runCmd("ip", "netns", "exec", s.Namespace, "ip", "link", "set", s.VethPeer, "up"); err != nil {
 		return fmt.Errorf("setting peer interface up in ns: %w", err)
 	}
-	
+
 	// Fix D: Disable Checksum Offloading on PEER side (inside NS)
 	exec.Command("ip", "netns", "exec", s.Namespace, "ethtool", "-K", s.VethPeer, "tx", "off", "rx", "off").Run()
 
@@ -227,8 +227,9 @@ func (s *Sandbox) SetupNetwork() error {
 	if err := os.MkdirAll(netnsDir, 0755); err != nil {
 		return fmt.Errorf("creating netns config dir: %w", err)
 	}
-	
-	resolvConf := fmt.Sprintf("nameserver %s\n", gwIP)
+
+	// resolvConf := fmt.Sprintf("nameserver %s\n", gwIP)
+	resolvConf := "nameserver 127.0.0.1\noptions use-vc\n"
 	if err := os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644); err != nil {
 		return fmt.Errorf("writing ns resolv.conf: %w", err)
 	}
@@ -239,7 +240,7 @@ func (s *Sandbox) SetupNetwork() error {
 // ApplyFirewall configures nftables on the HOST to intercept traffic from the namespace
 func (s *Sandbox) ApplyFirewall() error {
 	tableName := "toralizer"
-	
+
 	if err := runCmd("nft", "add", "table", "inet", tableName); err != nil {
 		return fmt.Errorf("creating nft table: %w", err)
 	}
@@ -253,19 +254,25 @@ func (s *Sandbox) ApplyFirewall() error {
 
 	// RULE 1: Redirect DNS (UDP 53) -> Explicit DNAT to 127.0.0.1
 	// We use Explicit DNAT instead of 'redirect' to avoid ambiguity with interface IPs
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting, 
-		"iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorDNSPort)); err != nil {
+	// if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
+	// 	"iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorDNSPort)); err != nil {
+	// 	return fmt.Errorf("adding dns redirect rule: %w", err)
+	// }
+	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
+		"iifname", s.VethHost,
+		"udp", "dport", "53",
+		"redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort)); err != nil {
 		return fmt.Errorf("adding dns redirect rule: %w", err)
 	}
 
 	// RULE 2: Redirect TCP -> Explicit DNAT to 127.0.0.1
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting, 
+	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
 		"iifname", s.VethHost, "meta", "l4proto", "tcp", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorTransPort)); err != nil {
 		return fmt.Errorf("adding tcp redirect rule: %w", err)
 	}
 
 	// RULE 3: DROP everything else from this interface
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting, 
+	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
 		"iifname", s.VethHost, "drop"); err != nil {
 		return fmt.Errorf("adding drop rule: %w", err)
 	}
@@ -279,7 +286,7 @@ func (s *Sandbox) ApplyFirewall() error {
 	}
 
 	// RULE 4: Explicitly Accept traffic from veth interface
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainInput, 
+	if err := runCmd("nft", "add", "rule", "inet", tableName, chainInput,
 		"iifname", s.VethHost, "accept"); err != nil {
 		return fmt.Errorf("adding input accept rule: %w", err)
 	}
@@ -323,7 +330,7 @@ func (s *Sandbox) Teardown() {
 	tableName := "toralizer"
 	chainPrerouting := fmt.Sprintf("pre-%s", s.ID)
 	chainInput := fmt.Sprintf("in-%s", s.ID)
-	
+
 	// We ignore errors here in case chains don't exist
 	exec.Command("nft", "delete", "chain", "inet", tableName, chainPrerouting).Run()
 	exec.Command("nft", "delete", "chain", "inet", tableName, chainInput).Run()
