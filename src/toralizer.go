@@ -178,12 +178,21 @@ func (s *Sandbox) SetupNetwork() error {
 		return fmt.Errorf("setting host interface up: %w", err)
 	}
 
-	// --- CRITICAL FIX: Enable route_localnet ---
-	// This allows the kernel to route traffic from the veth interface to 127.0.0.1 (Tor)
-	// Without this, packets redirected to localhost from an external interface are dropped (Martian packets).
-	sysctlPath := fmt.Sprintf("net.ipv4.conf.%s.route_localnet", s.VethHost)
-	if err := runCmd("sysctl", "-w", fmt.Sprintf("%s=1", sysctlPath)); err != nil {
+	// --- CRITICAL FIXES FOR CONNECTIVITY ---
+
+	// Fix A: Enable route_localnet
+	// Allows 127.0.0.1 traffic to be routed on this interface
+	sysctlLocalnet := fmt.Sprintf("net.ipv4.conf.%s.route_localnet", s.VethHost)
+	if err := runCmd("sysctl", "-w", fmt.Sprintf("%s=1", sysctlLocalnet)); err != nil {
 		return fmt.Errorf("enabling route_localnet: %w", err)
+	}
+
+	// Fix B: Disable RP_FILTER (Reverse Path Filter)
+	// Strict RP_FILTER drops packets destined for 127.0.0.1 arriving on a veth interface
+	// We must disable it (set to 0) for the host-side veth
+	sysctlRpFilter := fmt.Sprintf("net.ipv4.conf.%s.rp_filter", s.VethHost)
+	if err := runCmd("sysctl", "-w", fmt.Sprintf("%s=0", sysctlRpFilter)); err != nil {
+		return fmt.Errorf("disabling rp_filter: %w", err)
 	}
 
 	// 5. Configure Namespace Interface (requires executing inside netns)
@@ -199,6 +208,11 @@ func (s *Sandbox) SetupNetwork() error {
 	if err := runCmd("ip", "netns", "exec", s.Namespace, "ip", "link", "set", s.VethPeer, "up"); err != nil {
 		return fmt.Errorf("setting peer interface up in ns: %w", err)
 	}
+	
+	// Attempt to turn off offloading in the namespace to prevent bad checksums (common veth issue)
+	// We ignore errors here as ethtool might not be installed
+	exec.Command("ip", "netns", "exec", s.Namespace, "ethtool", "-K", s.VethPeer, "tx", "off", "rx", "off").Run()
+
 	// Set Default Route (Gateway is Host IP)
 	gwIP := strings.Split(s.IPHost, "/")[0]
 	if err := runCmd("ip", "netns", "exec", s.Namespace, "ip", "route", "add", "default", "via", gwIP); err != nil {
@@ -206,15 +220,11 @@ func (s *Sandbox) SetupNetwork() error {
 	}
 
 	// 6. Setup DNS Overlay
-	// 'ip netns exec' will automatically bind mount /etc/netns/<NAME>/resolv.conf over /etc/resolv.conf
-	// This ensures the container uses a DNS server we can intercept (the Gateway), and not a host loopback (127.0.0.53).
 	netnsDir := fmt.Sprintf("/etc/netns/%s", s.Namespace)
 	if err := os.MkdirAll(netnsDir, 0755); err != nil {
 		return fmt.Errorf("creating netns config dir: %w", err)
 	}
 	
-	// We point DNS to the Gateway IP. The Firewall will catch this UDP 53 traffic and redirect to Tor.
-	// This prevents apps from trying to hit 127.0.0.53 (systemd-resolved) which would fail inside the netns.
 	resolvConf := fmt.Sprintf("nameserver %s\n", gwIP)
 	if err := os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644); err != nil {
 		return fmt.Errorf("writing ns resolv.conf: %w", err)
@@ -237,15 +247,16 @@ func (s *Sandbox) ApplyFirewall() error {
 		return fmt.Errorf("creating nft chain: %w", err)
 	}
 
-	// RULE 1: Redirect DNS (UDP 53) to Tor DNSPort
+	// RULE 1: Redirect DNS (UDP 53) -> Explicit DNAT to 127.0.0.1
+	// We use Explicit DNAT instead of 'redirect' to avoid ambiguity with interface IPs
 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainName, 
-		"iifname", s.VethHost, "udp", "dport", "53", "redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort)); err != nil {
+		"iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorDNSPort)); err != nil {
 		return fmt.Errorf("adding dns redirect rule: %w", err)
 	}
 
-	// RULE 2: Redirect TCP to Tor TransPort
+	// RULE 2: Redirect TCP -> Explicit DNAT to 127.0.0.1
 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainName, 
-		"iifname", s.VethHost, "meta", "l4proto", "tcp", "redirect", "to", fmt.Sprintf(":%d", s.Config.TorTransPort)); err != nil {
+		"iifname", s.VethHost, "meta", "l4proto", "tcp", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorTransPort)); err != nil {
 		return fmt.Errorf("adding tcp redirect rule: %w", err)
 	}
 
@@ -259,8 +270,6 @@ func (s *Sandbox) ApplyFirewall() error {
 }
 
 // Run executes the command inside the namespace using 'ip netns exec'
-// We switched from 'nsenter' to 'ip netns exec' because the latter automatically handles
-// the /etc/netns/<NAME>/resolv.conf bind mount, which is crucial for fixing DNS.
 func (s *Sandbox) Run(bin string, args []string) error {
 	// Prepare params
 	cmdParams := []string{"netns", "exec", s.Namespace, bin}
