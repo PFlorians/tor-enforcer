@@ -233,17 +233,15 @@ func (s *Sandbox) SetupNetwork() error {
 
 	// resolvConf := fmt.Sprintf("nameserver %s\n", gwIP)
 	// resolvConf := "nameserver 1.1.1.1\noptions edns0 trust-ad\n"
-	resolvConf := "nameserver 1.1.1.1\noptions use-vc\n"
+	resolvConf := "nameserver 8.8.8.8\noptions edns0 trust-ad use-vc\n"
 	if err := os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644); err != nil {
 		return fmt.Errorf("writing ns resolv.conf: %w", err)
 	}
 
-	nsswitch := `hosts: files dns
-`
+	nsswitch := "hosts: files dns"
 	if err := os.WriteFile(filepath.Join(netnsDir, "nsswitch.conf"), []byte(nsswitch), 0644); err != nil {
 		return fmt.Errorf("writing nsswitch.conf: %w", err)
 	}
-
 
 	return nil
 }
@@ -273,6 +271,13 @@ func (s *Sandbox) ApplyFirewall() error {
 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
 		"iifname", s.VethHost,
 		"udp", "dport", "53",
+		"redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort)); err != nil {
+		return fmt.Errorf("adding dns redirect rule: %w", err)
+	}
+
+	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
+		"iifname", s.VethHost, 
+		"tcp", "dport", "53",
 		"redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort)); err != nil {
 		return fmt.Errorf("adding dns redirect rule: %w", err)
 	}
