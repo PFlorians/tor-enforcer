@@ -232,7 +232,8 @@ func (s *Sandbox) SetupNetwork() error {
 	}
 
 	// resolvConf := fmt.Sprintf("nameserver %s\n", gwIP)
-	resolvConf := "nameserver 127.0.0.1\noptions edns0 trust-ad\n"
+	// resolvConf := "nameserver 1.1.1.1\noptions edns0 trust-ad\n"
+	resolvConf := "nameserver 1.1.1.1\noptions use-vc\n"
 	if err := os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644); err != nil {
 		return fmt.Errorf("writing ns resolv.conf: %w", err)
 	}
