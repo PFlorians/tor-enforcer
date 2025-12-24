@@ -21,6 +21,17 @@ curl: (6) Could not resolve host: check.torproject.org
 2025/12/24 11:54:40 Execution finished with error: exit status 9
 
 
+sudo tcpdump -ni veth-h-93de5f16 udp port 53
+
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on veth-h-93de5f16, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+^C
+0 packets captured
+0 packets received by filter
+0 packets dropped by kernel
+
+sudo ip netns exec tor-ns-93de5f16 tcpdump -ni any udp port 53
+
 tcpdump: data link type LINUX_SLL2
 tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
 listening on any, link-type LINUX_SLL2 (Linux cooked v2), snapshot length 262144 bytes
@@ -28,3 +39,13 @@ listening on any, link-type LINUX_SLL2 (Linux cooked v2), snapshot length 262144
 0 packets captured
 0 packets received by filter
 0 packets dropped by kernel
+
+sudo tcpdump -ni lo udp port 53
+
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on lo, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+^C
+0 packets captured
+0 packets received by filter
+0 packets dropped by kernel
+
