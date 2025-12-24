@@ -194,6 +194,10 @@ func (s *Sandbox) SetupNetwork() error {
 	if err := runCmd("sysctl", "-w", fmt.Sprintf("%s=0", sysctlRpFilter)); err != nil {
 		return fmt.Errorf("disabling rp_filter: %w", err)
 	}
+	
+	// Fix C: Disable Checksum Offloading on HOST side
+	// Veth packets often have partial checksums which cause drops when redirected to loopback
+	exec.Command("ethtool", "-K", s.VethHost, "tx", "off", "rx", "off").Run()
 
 	// 5. Configure Namespace Interface (requires executing inside netns)
 	// Enable loopback in NS
@@ -209,8 +213,7 @@ func (s *Sandbox) SetupNetwork() error {
 		return fmt.Errorf("setting peer interface up in ns: %w", err)
 	}
 	
-	// Attempt to turn off offloading in the namespace to prevent bad checksums (common veth issue)
-	// We ignore errors here as ethtool might not be installed
+	// Fix D: Disable Checksum Offloading on PEER side (inside NS)
 	exec.Command("ip", "netns", "exec", s.Namespace, "ethtool", "-K", s.VethPeer, "tx", "off", "rx", "off").Run()
 
 	// Set Default Route (Gateway is Host IP)
@@ -241,29 +244,44 @@ func (s *Sandbox) ApplyFirewall() error {
 		return fmt.Errorf("creating nft table: %w", err)
 	}
 
-	chainName := fmt.Sprintf("chain-%s", s.ID)
-	// Prerouting hook with priority -100 (destnat)
-	if err := runCmd("nft", "add", "chain", "inet", tableName, chainName, "{ type nat hook prerouting priority -100; }"); err != nil {
-		return fmt.Errorf("creating nft chain: %w", err)
+	// Chain 1: PREROUTING (DNAT)
+	// Priority -100 ensures we see packets before routing decisions
+	chainPrerouting := fmt.Sprintf("pre-%s", s.ID)
+	if err := runCmd("nft", "add", "chain", "inet", tableName, chainPrerouting, "{ type nat hook prerouting priority -100; }"); err != nil {
+		return fmt.Errorf("creating nft prerouting chain: %w", err)
 	}
 
 	// RULE 1: Redirect DNS (UDP 53) -> Explicit DNAT to 127.0.0.1
 	// We use Explicit DNAT instead of 'redirect' to avoid ambiguity with interface IPs
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainName, 
+	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting, 
 		"iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorDNSPort)); err != nil {
 		return fmt.Errorf("adding dns redirect rule: %w", err)
 	}
 
 	// RULE 2: Redirect TCP -> Explicit DNAT to 127.0.0.1
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainName, 
+	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting, 
 		"iifname", s.VethHost, "meta", "l4proto", "tcp", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorTransPort)); err != nil {
 		return fmt.Errorf("adding tcp redirect rule: %w", err)
 	}
 
 	// RULE 3: DROP everything else from this interface
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainName, 
+	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting, 
 		"iifname", s.VethHost, "drop"); err != nil {
 		return fmt.Errorf("adding drop rule: %w", err)
+	}
+
+	// Chain 2: INPUT (ACCEPT)
+	// Priority -50 ensures we accept before standard filter chains (usually priority 0) drop it.
+	// This is critical because after DNAT to 127.0.0.1, the packet is routed to INPUT.
+	chainInput := fmt.Sprintf("in-%s", s.ID)
+	if err := runCmd("nft", "add", "chain", "inet", tableName, chainInput, "{ type filter hook input priority -50; }"); err != nil {
+		return fmt.Errorf("creating nft input chain: %w", err)
+	}
+
+	// RULE 4: Explicitly Accept traffic from veth interface
+	if err := runCmd("nft", "add", "rule", "inet", tableName, chainInput, 
+		"iifname", s.VethHost, "accept"); err != nil {
+		return fmt.Errorf("adding input accept rule: %w", err)
 	}
 
 	return nil
@@ -301,10 +319,14 @@ func (s *Sandbox) Teardown() {
 		log.Printf("Warning: failed to remove netns config: %v", err)
 	}
 
-	// 3. Remove NFTables Chain
+	// 3. Remove NFTables Chains
 	tableName := "toralizer"
-	chainName := fmt.Sprintf("chain-%s", s.ID)
-	exec.Command("nft", "delete", "chain", "inet", tableName, chainName).Run()
+	chainPrerouting := fmt.Sprintf("pre-%s", s.ID)
+	chainInput := fmt.Sprintf("in-%s", s.ID)
+	
+	// We ignore errors here in case chains don't exist
+	exec.Command("nft", "delete", "chain", "inet", tableName, chainPrerouting).Run()
+	exec.Command("nft", "delete", "chain", "inet", tableName, chainInput).Run()
 }
 
 func runCmd(name string, args ...string) error {
