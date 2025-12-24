@@ -50,13 +50,13 @@ go build -o toralizer toralizer.go
 To run an application through Tor:
 
 ```shell
-sudo ./toralizer run curl [https://check.torproject.org/api/ip](https://check.torproject.org/api/ip)
+sudo ./toralizer curl https://check.torproject.org/api/ip
 ```
 
 ### To verify DNS leak protection:
 ```shell
 # Should resolve via Tor exit node, not your ISP
-sudo ./toralizer run dig google.com
+sudo ./toralizer dig google.com
 ```
 
 To run an interactive shell inside the Tor sandbox:
