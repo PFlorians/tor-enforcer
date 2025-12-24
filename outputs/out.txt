@@ -49,3 +49,12 @@ listening on lo, link-type EN10MB (Ethernet), snapshot length 262144 bytes
 0 packets received by filter
 0 packets dropped by kernel
 
+table inet toralizer {
+	chain pre-5be98d91 { # handle 71
+		type nat hook prerouting priority dstnat; policy accept;
+		iifname "veth-h-5be98d91" udp dport 53 redirect to :9053 # handle 72
+		iifname "veth-h-5be98d91" meta l4proto tcp dnat ip to 127.0.0.1:9040 # handle 73
+		iifname "veth-h-5be98d91" drop # handle 74
+	}
+}
+
