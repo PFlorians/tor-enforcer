@@ -247,69 +247,150 @@ func (s *Sandbox) SetupNetwork() error {
 }
 
 // ApplyFirewall configures nftables on the HOST to intercept traffic from the namespace
+// func (s *Sandbox) ApplyFirewall() error {
+// 	tableName := "toralizer"
+
+// 	if err := runCmd("nft", "add", "table", "inet", tableName); err != nil {
+// 		return fmt.Errorf("creating nft table: %w", err)
+// 	}
+
+// 	// Chain 1: PREROUTING (DNAT)
+// 	// Priority -100 ensures we see packets before routing decisions
+// 	chainPrerouting := fmt.Sprintf("pre-%s", s.ID)
+// 	log.Printf("prerouting chain name: %s", chainPrerouting)
+// 	if err := runCmd("nft", "add", "chain", "inet", tableName, chainPrerouting, "{ type nat hook prerouting priority -100; }"); err != nil {
+// 		return fmt.Errorf("creating nft prerouting chain: %w", err)
+// 	}
+
+// 	// RULE 1: Redirect DNS (UDP 53) -> Explicit DNAT to 127.0.0.1
+// 	// We use Explicit DNAT instead of 'redirect' to avoid ambiguity with interface IPs
+// 	// if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
+// 	// 	"iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorDNSPort)); err != nil {
+// 	// 	return fmt.Errorf("adding dns redirect rule: %w", err)
+// 	// }
+// 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
+// 		"iifname", s.VethHost,
+// 		"udp", "dport", "53",
+// 		"redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort)); err != nil {
+// 		return fmt.Errorf("adding dns redirect rule: %w", err)
+// 	}
+
+// 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
+// 		"iifname", s.VethHost, 
+// 		"tcp", "dport", "53",
+// 		"redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort)); err != nil {
+// 		return fmt.Errorf("adding dns redirect rule: %w", err)
+// 	}
+
+// 	// RULE 2: Redirect TCP -> Explicit DNAT to 127.0.0.1
+// 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
+// 		"iifname", s.VethHost, "meta", "l4proto", "tcp", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorTransPort)); err != nil {
+// 		return fmt.Errorf("adding tcp redirect rule: %w", err)
+// 	}
+
+// 	// RULE 3: DROP everything else from this interface
+// 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
+// 		"iifname", s.VethHost, "drop"); err != nil {
+// 		return fmt.Errorf("adding drop rule: %w", err)
+// 	}
+
+// 	// Chain 2: INPUT (ACCEPT)
+// 	// Priority -50 ensures we accept before standard filter chains (usually priority 0) drop it.
+// 	// This is critical because after DNAT to 127.0.0.1, the packet is routed to INPUT.
+// 	chainInput := fmt.Sprintf("in-%s", s.ID)
+// 	if err := runCmd("nft", "add", "chain", "inet", tableName, chainInput, "{ type filter hook input priority -50; }"); err != nil {
+// 		return fmt.Errorf("creating nft input chain: %w", err)
+// 	}
+
+// 	// RULE 4: Explicitly Accept traffic from veth interface
+// 	if err := runCmd("nft", "add", "rule", "inet", tableName, chainInput,
+// 		"iifname", s.VethHost, "accept"); err != nil {
+// 		return fmt.Errorf("adding input accept rule: %w", err)
+// 	}
+
+// 	return nil
+// }
+
 func (s *Sandbox) ApplyFirewall() error {
 	tableName := "toralizer"
 
-	if err := runCmd("nft", "add", "table", "inet", tableName); err != nil {
-		return fmt.Errorf("creating nft table: %w", err)
-	}
+	// Extract host veth IP without CIDR (e.g. 10.200.0.1)
+	hostIP := strings.Split(s.IPHost, "/")[0]
 
-	// Chain 1: PREROUTING (DNAT)
-	// Priority -100 ensures we see packets before routing decisions
+	// Create table (ignore error if it already exists)
+	_ = runCmd("nft", "add", "table", "inet", tableName)
+
+	// -------------------------------
+	// PREROUTING (NAT)
+	// -------------------------------
 	chainPrerouting := fmt.Sprintf("pre-%s", s.ID)
-	log.Printf("prerouting chain name: %s", chainPrerouting)
-	if err := runCmd("nft", "add", "chain", "inet", tableName, chainPrerouting, "{ type nat hook prerouting priority -100; }"); err != nil {
+	if err := runCmd(
+		"nft", "add", "chain", "inet", tableName, chainPrerouting,
+		"{ type nat hook prerouting priority -100; }",
+	); err != nil {
 		return fmt.Errorf("creating nft prerouting chain: %w", err)
 	}
 
-	// RULE 1: Redirect DNS (UDP 53) -> Explicit DNAT to 127.0.0.1
-	// We use Explicit DNAT instead of 'redirect' to avoid ambiguity with interface IPs
-	// if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
-	// 	"iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorDNSPort)); err != nil {
-	// 	return fmt.Errorf("adding dns redirect rule: %w", err)
-	// }
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
+	// ---- DNS over UDP ----
+	if err := runCmd(
+		"nft", "add", "rule", "inet", tableName, chainPrerouting,
 		"iifname", s.VethHost,
 		"udp", "dport", "53",
-		"redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort)); err != nil {
-		return fmt.Errorf("adding dns redirect rule: %w", err)
+		"dnat", "ip", "to", fmt.Sprintf("%s:%d", hostIP, s.Config.TorDNSPort),
+	); err != nil {
+		return fmt.Errorf("adding UDP DNS DNAT rule: %w", err)
 	}
 
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
-		"iifname", s.VethHost, 
+	// ---- DNS over TCP (CRITICAL) ----
+	if err := runCmd(
+		"nft", "add", "rule", "inet", tableName, chainPrerouting,
+		"iifname", s.VethHost,
 		"tcp", "dport", "53",
-		"redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort)); err != nil {
-		return fmt.Errorf("adding dns redirect rule: %w", err)
+		"dnat", "ip", "to", fmt.Sprintf("%s:%d", hostIP, s.Config.TorDNSPort),
+	); err != nil {
+		return fmt.Errorf("adding TCP DNS DNAT rule: %w", err)
 	}
 
-	// RULE 2: Redirect TCP -> Explicit DNAT to 127.0.0.1
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
-		"iifname", s.VethHost, "meta", "l4proto", "tcp", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorTransPort)); err != nil {
-		return fmt.Errorf("adding tcp redirect rule: %w", err)
+	// ---- All other TCP → Tor TransPort ----
+	if err := runCmd(
+		"nft", "add", "rule", "inet", tableName, chainPrerouting,
+		"iifname", s.VethHost,
+		"meta", "l4proto", "tcp",
+		"dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorTransPort),
+	); err != nil {
+		return fmt.Errorf("adding TCP TransPort DNAT rule: %w", err)
 	}
 
-	// RULE 3: DROP everything else from this interface
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainPrerouting,
-		"iifname", s.VethHost, "drop"); err != nil {
+	// ---- Fail-closed: drop everything else ----
+	if err := runCmd(
+		"nft", "add", "rule", "inet", tableName, chainPrerouting,
+		"iifname", s.VethHost, "drop",
+	); err != nil {
 		return fmt.Errorf("adding drop rule: %w", err)
 	}
 
-	// Chain 2: INPUT (ACCEPT)
-	// Priority -50 ensures we accept before standard filter chains (usually priority 0) drop it.
-	// This is critical because after DNAT to 127.0.0.1, the packet is routed to INPUT.
+	// -------------------------------
+	// INPUT (allow DNATed traffic)
+	// -------------------------------
 	chainInput := fmt.Sprintf("in-%s", s.ID)
-	if err := runCmd("nft", "add", "chain", "inet", tableName, chainInput, "{ type filter hook input priority -50; }"); err != nil {
+	if err := runCmd(
+		"nft", "add", "chain", "inet", tableName, chainInput,
+		"{ type filter hook input priority -50; }",
+	); err != nil {
 		return fmt.Errorf("creating nft input chain: %w", err)
 	}
 
-	// RULE 4: Explicitly Accept traffic from veth interface
-	if err := runCmd("nft", "add", "rule", "inet", tableName, chainInput,
-		"iifname", s.VethHost, "accept"); err != nil {
+	// Allow traffic arriving from veth after DNAT
+	if err := runCmd(
+		"nft", "add", "rule", "inet", tableName, chainInput,
+		"iifname", s.VethHost, "accept",
+	); err != nil {
 		return fmt.Errorf("adding input accept rule: %w", err)
 	}
 
 	return nil
 }
+
 
 // Run executes the command inside the namespace using 'ip netns exec'
 func (s *Sandbox) Run(bin string, args []string) error {
