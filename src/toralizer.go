@@ -161,6 +161,7 @@ func (s *Sandbox) SetupNetwork() error {
 		return fmt.Errorf("creating netns: %w", err)
 	}
 
+	log.Printf("Creting veth host: %s, veth peer: %s", s.VethHost, s.VethPeer)
 	// 2. Create Veth Pair
 	if err := runCmd("ip", "link", "add", s.VethHost, "type", "veth", "peer", "name", s.VethPeer); err != nil {
 		return fmt.Errorf("creating veth pair: %w", err)
