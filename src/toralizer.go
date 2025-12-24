@@ -250,6 +250,7 @@ func (s *Sandbox) ApplyFirewall() error {
 	// Chain 1: PREROUTING (DNAT)
 	// Priority -100 ensures we see packets before routing decisions
 	chainPrerouting := fmt.Sprintf("pre-%s", s.ID)
+	log.Printf("prerouting chain name: %s", chainPrerouting)
 	if err := runCmd("nft", "add", "chain", "inet", tableName, chainPrerouting, "{ type nat hook prerouting priority -100; }"); err != nil {
 		return fmt.Errorf("creating nft prerouting chain: %w", err)
 	}
