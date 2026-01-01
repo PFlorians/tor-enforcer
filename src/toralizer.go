@@ -141,69 +141,71 @@ func NewSandbox(cfg Config) (*Sandbox, error) {
 }
 
 func (s *Sandbox) SetupNetwork() error {
-    runCmd("ip", "netns", "add", s.Namespace)
-    runCmd("ip", "link", "add", s.VethHost, "type", "veth", "peer", "name", s.VethPeer)
-    runCmd("ip", "link", "set", s.VethPeer, "netns", s.Namespace)
-    runCmd("ip", "addr", "add", s.IPHost+"/30", "dev", s.VethHost)
-    runCmd("ip", "link", "set", s.VethHost, "up")
+	runCmd("ip", "netns", "add", s.Namespace)
+	runCmd("ip", "link", "add", s.VethHost, "type", "veth", "peer", "name", s.VethPeer)
+	runCmd("ip", "link", "set", s.VethPeer, "netns", s.Namespace)
+	runCmd("ip", "addr", "add", s.IPHost+"/30", "dev", s.VethHost)
+	runCmd("ip", "link", "set", s.VethHost, "up")
 
-    runCmd("sysctl", "-w", "net.ipv4.conf.all.rp_filter=0")
-    runCmd("sysctl", "-w", "net.ipv4.conf.default.rp_filter=0")
-    runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", s.VethHost))
-    runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.route_localnet=1", s.VethHost))
+	// Essential sysctls for cross-namespace loopback redirection
+	runCmd("sysctl", "-w", "net.ipv4.conf.all.rp_filter=0")
+	runCmd("sysctl", "-w", "net.ipv4.conf.default.rp_filter=0")
+	runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", s.VethHost))
+	runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.route_localnet=1", s.VethHost))
 
-    exec.Command("ethtool", "-K", s.VethHost, "tx", "off", "rx", "off").Run()
+	// --- THE FIX: DISABLE OFF-LOADING IN BOTH SIDES ---
+	// Host side
+	exec.Command("ethtool", "-K", s.VethHost, "tx", "off", "rx", "off", "gso", "off").Run()
 
-    runCmd("ip", "netns", "exec", s.Namespace, "ip", "link", "set", "lo", "up")
-    runCmd("ip", "netns", "exec", s.Namespace, "ip", "addr", "add", s.IPPeer+"/30", "dev", s.VethPeer)
-    runCmd("ip", "netns", "exec", s.Namespace, "ip", "link", "set", s.VethPeer, "up")
-    
-    runCmd("ip", "netns", "exec", s.Namespace, "ip", "route", "add", "default", "via", s.IPHost)
+	runCmd("ip", "netns", "exec", s.Namespace, "ip", "link", "set", "lo", "up")
+	runCmd("ip", "netns", "exec", s.Namespace, "ip", "addr", "add", s.IPPeer+"/30", "dev", s.VethPeer)
+	runCmd("ip", "netns", "exec", s.Namespace, "ip", "link", "set", s.VethPeer, "up")
 
-    netnsDir := fmt.Sprintf("/etc/netns/%s", s.Namespace)
-    os.MkdirAll(netnsDir, 0755)
-    
-    resolvConf := fmt.Sprintf("nameserver %s\n", s.IPHost)
-    os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644)
+	// Peer side (inside the namespace) - THIS IS CRITICAL
+	// By disabling TX offloading inside the namespace, the containerized process
+	// is forced to calculate the UDP/TCP checksums in software.
+	runCmd("ip", "netns", "exec", s.Namespace, "ethtool", "-K", s.VethPeer, "tx", "off", "rx", "off", "gso", "off")
 
-    return nil
+	runCmd("ip", "netns", "exec", s.Namespace, "ip", "route", "add", "default", "via", s.IPHost)
+
+	netnsDir := fmt.Sprintf("/etc/netns/%s", s.Namespace)
+	os.MkdirAll(netnsDir, 0755)
+	resolvConf := fmt.Sprintf("nameserver %s\n", s.IPHost)
+	os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644)
+
+	return nil
 }
 
 func (s *Sandbox) ApplyFirewall2() error {
-    tableName := "toralizer"
-    
-    // We use 'inet' table to allow the 'mangle' hook which can fix checksums
-    runCmd("nft", "add", "table", "inet", tableName)
+	tableName := "toralizer"
+	runCmd("nft", "add", "table", "inet", tableName)
 
-    // --- FIX CHECKSUMS ---
-    // This is the critical fix for the [bad udp cksum] error you saw in tcpdump.
-    // We set the UDP checksum to 0, which is technically valid in IPv4 for "no checksum".
-    chainMangle := fmt.Sprintf("mangle-%s", s.ID)
-    runCmd("nft", "add", "chain", "inet", tableName, chainMangle, "{ type filter hook prerouting priority -150; }")
-    runCmd("nft", "add", "rule", "inet", tableName, chainMangle, "iifname", s.VethHost, "udp", "dport", "53", "udp", "checksum", "set", "0")
+	// --- FIX CHECKSUMS (Safety Net) ---
+	chainMangle := fmt.Sprintf("mangle-%s", s.ID)
+	runCmd("nft", "add", "chain", "inet", tableName, chainMangle, "{ type filter hook prerouting priority -150; }")
+	runCmd("nft", "add", "rule", "inet", tableName, chainMangle, "iifname", s.VethHost, "udp", "dport", "53", "udp", "checksum", "set", "0")
 
-    // --- NAT REDIRECTION ---
-    chainNat := fmt.Sprintf("nat-%s", s.ID)
-    runCmd("nft", "add", "chain", "inet", tableName, chainNat, "{ type nat hook prerouting priority -100; }")
-    
-    // DNS
-    runCmd("nft", "add", "rule", "inet", tableName, chainNat, "iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorDNSPort))
-    // TCP
-    runCmd("nft", "add", "rule", "inet", tableName, chainNat, "iifname", s.VethHost, "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorTransPort))
+	// --- NAT REDIRECTION ---
+	chainNat := fmt.Sprintf("nat-%s", s.ID)
+	runCmd("nft", "add", "chain", "inet", tableName, chainNat, "{ type nat hook prerouting priority -100; }")
+	
+	// DNAT to the Host's Veth IP where Tor is listening (0.0.0.0)
+	runCmd("nft", "add", "rule", "inet", tableName, chainNat, "iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorDNSPort))
+	runCmd("nft", "add", "rule", "inet", tableName, chainNat, "iifname", s.VethHost, "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorTransPort))
 
-    // --- FILTER INPUT ---
-    chainFilter := fmt.Sprintf("filter-%s", s.ID)
-    runCmd("nft", "add", "chain", "inet", tableName, chainFilter, "{ type filter hook input priority 0; }")
+	// --- FILTER INPUT ---
+	chainFilter := fmt.Sprintf("filter-%s", s.ID)
+	runCmd("nft", "add", "chain", "inet", tableName, chainFilter, "{ type filter hook input priority 0; }")
 
-    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "ct", "state", "established,related", "accept")
-    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "udp", "dport", fmt.Sprintf("%d", s.Config.TorDNSPort), "accept")
-    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "tcp", "dport", fmt.Sprintf("%d", s.Config.TorTransPort), "accept")
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "ct", "state", "established,related", "accept")
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "udp", "dport", fmt.Sprintf("%d", s.Config.TorDNSPort), "accept")
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "tcp", "dport", fmt.Sprintf("%d", s.Config.TorTransPort), "accept")
 
-    // Final Drop
-    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "reject", "with", "icmp", "port-unreachable")
-    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "drop")
+	// Fail-Closed
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "reject", "with", "icmp", "port-unreachable")
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "drop")
 
-    return nil
+	return nil
 }
 
 
