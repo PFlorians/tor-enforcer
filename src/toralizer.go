@@ -97,7 +97,7 @@ func main() {
     }()
     
     // Give network stack time to settle
-    time.Sleep(1 * time.Second)
+    time.Sleep(1 * time.Minute)
 
     if sandbox.Config.Verbose {
         log.Printf("Executing: %s %v", command, cmdArgs)

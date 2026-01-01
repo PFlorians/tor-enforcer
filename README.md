@@ -78,3 +78,10 @@ sudo ./toralizer run /bin/bash
 - **IPv6**: Currently disabled/ignored inside the namespace (IPv4 only logic).
 - **UDP**: Blocked (except DNS). Applications relying on UDP (like WebRTC or QUIC) will fail or fallback to TCP if supported.
 - **Root**: The tool must run as root, but the target application runs with "preserved credentials" (currently root in the namespace). For production use, consider dropping privileges inside the nsenter call.
+
+## Debugging commands
+```shell
+sudo tcpdump -v -ni lo tcp port 9053 # watch all tcp traffic on port 9053
+sudo tcpdump -v -ni lo udp port 9053
+sudo nft -a list chain inet toralizer pre-<uuid>
+```
