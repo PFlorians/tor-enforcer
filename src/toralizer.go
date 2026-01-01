@@ -16,7 +16,6 @@ import (
     "os/exec"
     "os/signal"
     "path/filepath"
-    "strings"
     "syscall"
     "time"
 )
@@ -83,7 +82,7 @@ func main() {
     if sandbox.Config.Verbose {
         log.Println("Applying fail-closed Tor firewall rules...")
     }
-    if err := sandbox.ApplyFirewall(); err != nil {
+    if err := sandbox.ApplyFirewall2(); err != nil {
         log.Fatalf("Firewall setup failed: %v", err)
     }
 
@@ -135,8 +134,8 @@ func NewSandbox(cfg Config) (*Sandbox, error) {
         Namespace: fmt.Sprintf("tor-ns-%s", id),
         VethHost:  fmt.Sprintf("veth-h-%s", id),
         VethPeer:  fmt.Sprintf("veth-p-%s", id),
-        IPHost:    fmt.Sprintf("%s/30", ipHost),
-        IPPeer:    fmt.Sprintf("%s/30", ipPeer),
+        IPHost:    ipHost, // No CIDR suffix for raw IP usage
+        IPPeer:    ipPeer,
         Config:    cfg,
     }, nil
 }
@@ -145,36 +144,66 @@ func (s *Sandbox) SetupNetwork() error {
     runCmd("ip", "netns", "add", s.Namespace)
     runCmd("ip", "link", "add", s.VethHost, "type", "veth", "peer", "name", s.VethPeer)
     runCmd("ip", "link", "set", s.VethPeer, "netns", s.Namespace)
-    runCmd("ip", "addr", "add", s.IPHost, "dev", s.VethHost)
+    runCmd("ip", "addr", "add", s.IPHost+"/30", "dev", s.VethHost)
     runCmd("ip", "link", "set", s.VethHost, "up")
 
-    // Disable RP_FILTER and enable localnet routing (essential for redirect to 127.0.0.1)
     runCmd("sysctl", "-w", "net.ipv4.conf.all.rp_filter=0")
     runCmd("sysctl", "-w", "net.ipv4.conf.default.rp_filter=0")
     runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", s.VethHost))
     runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.route_localnet=1", s.VethHost))
 
-    // Disable offloading to prevent checksum errors on veth
     exec.Command("ethtool", "-K", s.VethHost, "tx", "off", "rx", "off").Run()
 
     runCmd("ip", "netns", "exec", s.Namespace, "ip", "link", "set", "lo", "up")
-    runCmd("ip", "netns", "exec", s.Namespace, "ip", "addr", "add", s.IPPeer, "dev", s.VethPeer)
+    runCmd("ip", "netns", "exec", s.Namespace, "ip", "addr", "add", s.IPPeer+"/30", "dev", s.VethPeer)
     runCmd("ip", "netns", "exec", s.Namespace, "ip", "link", "set", s.VethPeer, "up")
     
-    gwIP := strings.Split(s.IPHost, "/")[0]
-    runCmd("ip", "netns", "exec", s.Namespace, "ip", "route", "add", "default", "via", gwIP)
+    runCmd("ip", "netns", "exec", s.Namespace, "ip", "route", "add", "default", "via", s.IPHost)
 
     netnsDir := fmt.Sprintf("/etc/netns/%s", s.Namespace)
     os.MkdirAll(netnsDir, 0755)
     
-    // Set nameserver to the gateway (host IP). The firewall will hijack this UDP 53 traffic.
-    resolvConf := fmt.Sprintf("nameserver %s\n", gwIP)
+    resolvConf := fmt.Sprintf("nameserver %s\n", s.IPHost)
     os.WriteFile(filepath.Join(netnsDir, "resolv.conf"), []byte(resolvConf), 0644)
 
     return nil
 }
 
-// ApplyFirewall implements the "Bulletproof" logic requested, adapted for namespace context.
+func (s *Sandbox) ApplyFirewall2() error {
+    tableName := "toralizer"
+    runCmd("nft", "add", "table", "ip", tableName)
+
+    chainNat := fmt.Sprintf("pre-%s", s.ID)
+    runCmd("nft", "add", "chain", "ip", tableName, chainNat, "{ type nat hook prerouting priority -100; }")
+
+    // REDIRECTION LOGIC
+    // We target s.IPHost (10.200.0.1) because the Tor service on the host is 
+    // now listening on all interfaces (0.0.0.0).
+    
+    // DNS Redirection
+    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorDNSPort))
+
+    // Transparent Proxy Redirection (TCP)
+    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorTransPort))
+
+    // FILTERING LOGIC
+    chainFilter := fmt.Sprintf("in-%s", s.ID)
+    runCmd("nft", "add", "chain", "ip", tableName, chainFilter, "{ type filter hook input priority 0; }")
+
+    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "ct", "state", "established,related", "accept")
+
+    // Allow the specific redirected ports on the host's Veth IP
+    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "udp", "dport", fmt.Sprintf("%d", s.Config.TorDNSPort), "accept")
+    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "tcp", "dport", fmt.Sprintf("%d", s.Config.TorTransPort), "accept")
+
+    // Fail-Closed
+    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "reject", "with", "icmp", "port-unreachable")
+    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "drop")
+
+    return nil
+}
+
+
 func (s *Sandbox) ApplyFirewall() error {
     tableName := "toralizer"
     
