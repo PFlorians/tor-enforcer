@@ -210,76 +210,42 @@ func (s *Sandbox) ApplyFirewall2() error {
 
 
 func (s *Sandbox) ApplyFirewall() error {
-    tableName := "toralizer"
-    
-    // Use 'ip' family to match the requested script logic, though 'inet' is also valid.
-    runCmd("nft", "add", "table", "ip", tableName)
+	tableName := "toralizer"
+	runCmd("nft", "add", "table", "inet", tableName)
 
-    // --------------------------------------------------------------------------
-    // 1. NAT PREROUTING CHAIN
-    // Matches the logic of the requested "chain output" (NAT), but moved to 
-    // Prerouting because traffic is entering the host from the veth.
-    // --------------------------------------------------------------------------
-    chainNat := fmt.Sprintf("pre-%s", s.ID)
-    runCmd("nft", "add", "chain", "ip", tableName, chainNat, "{ type nat hook prerouting priority -100; }")
+	// --- THE AGGRESSIVE FIX: Zero out UDP checksums for ALL DNS traffic from the veth ---
+	// Priority -150 is early enough to fix the packet before NAT or Filter see it.
+	chainMangle := fmt.Sprintf("mangle-%s", s.ID)
+	runCmd("nft", "add", "chain", "inet", tableName, chainMangle, "{ type filter hook prerouting priority -150; }")
+	
+	// We use raw payload matching to zero out the 2 bytes of the UDP checksum (offset 6 in UDP header)
+	// This is often more reliable than the 'udp checksum set 0' helper which some nft versions handle poorly.
+	runCmd("nft", "add", "rule", "inet", tableName, chainMangle, "iifname", s.VethHost, "udp", "dport", "53", "udp", "checksum", "set", "0")
 
-    // Do not redirect private networks (LANs) - allow them to pass through 
-    // (Note: They will likely be dropped by the filter chain later unless explicit)
-    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "ip", "daddr", "10.0.0.0/8", "return")
-    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "ip", "daddr", "172.16.0.0/12", "return")
-    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "ip", "daddr", "192.168.0.0/16", "return")
+	// --- NAT REDIRECTION ---
+	chainNat := fmt.Sprintf("nat-%s", s.ID)
+	runCmd("nft", "add", "chain", "inet", tableName, chainNat, "{ type nat hook prerouting priority -100; }")
+	
+	// Direct traffic to 127.0.0.1. Since route_localnet=1 is set, the host will accept this.
+	// This often bypasses external interface checksum checks in the IP stack.
+	runCmd("nft", "add", "rule", "inet", tableName, chainNat, "iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorDNSPort))
+	runCmd("nft", "add", "rule", "inet", tableName, chainNat, "iifname", s.VethHost, "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "dnat", "ip", "to", fmt.Sprintf("127.0.0.1:%d", s.Config.TorTransPort))
 
-    // Redirect HS connections to the TransPort
-    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "ip", "daddr", "127.192.0.0/10", "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "redirect", "to", fmt.Sprintf(":%d", s.Config.TorTransPort))
+	// --- FILTER INPUT ---
+	chainFilter := fmt.Sprintf("filter-%s", s.ID)
+	runCmd("nft", "add", "chain", "inet", tableName, chainFilter, "{ type filter hook input priority 0; }")
 
-    // Redirect DNS lookups to Tor DNSPort
-    // Using 9053 as requested (Config.TorDNSPort updated)
-    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "udp", "dport", "53", "redirect", "to", fmt.Sprintf(":%d", s.Config.TorDNSPort))
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "ct", "state", "established,related", "accept")
+	
+	// Allow the traffic redirected to localhost
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "ip", "daddr", "127.0.0.1", "udp", "dport", fmt.Sprintf("%d", s.Config.TorDNSPort), "accept")
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "ip", "daddr", "127.0.0.1", "tcp", "dport", fmt.Sprintf("%d", s.Config.TorTransPort), "accept")
 
-    // Redirect all TCP traffic to Tor TransPort
-    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "redirect", "to", fmt.Sprintf(":%d", s.Config.TorTransPort))
+	// Fail-Closed for everything else from the veth
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "reject", "with", "icmp", "port-unreachable")
+	runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "drop")
 
-
-    // --------------------------------------------------------------------------
-    // 2. FILTER INPUT CHAIN
-    // Matches the logic of the requested "chain output" (Filter) and "chain input" (Filter).
-    // Traffic redirected to localhost (via NAT above) hits the INPUT hook.
-    // --------------------------------------------------------------------------
-    chainFilter := fmt.Sprintf("in-%s", s.ID)
-    runCmd("nft", "add", "chain", "ip", tableName, chainFilter, "{ type filter hook input priority 0; }")
-
-    // Allow established connections (Critical for return traffic)
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "ct", "state", "established,related", "accept")
-
-    // Allow DNS requests to Tor DNSPort (After redirection)
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", "127.0.0.1", "udp", "dport", fmt.Sprintf("%d", s.Config.TorDNSPort), "accept")
-
-    // Allow traffic to Tor TransPort (After redirection)
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", "127.0.0.1", "tcp", "dport", fmt.Sprintf("%d", s.Config.TorTransPort), "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "accept")
-
-    // Allow traffic to Tor SOCKSPorts (Explicitly allowed in requested script)
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", "127.0.0.1", "tcp", "dport", "9050", "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "accept")
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", "127.0.0.1", "tcp", "dport", "9150", "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "accept")
-
-    // --------------------------------------------------------------------------
-    // 3. CLEANUP / DROP RULES
-    // The requested script had a "policy drop" on Input.
-    // SAFETY: We only drop traffic coming from THIS sandbox interface.
-    // Setting global policy drop in a custom table can be dangerous for the host.
-    // --------------------------------------------------------------------------
-    
-    // Log dropped packets (Optional, but good for debugging)
-    // runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "limit", "rate", "5/minute", "log", "prefix", "\"TorBlock: \"")
-
-    // Reject all other inbound connections from this namespace (Fail Closed)
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "udp", "ct", "state", "new", "reject", "with", "icmp", "port-unreachable")
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "tcp", "ct", "state", "new", "reject", "with", "tcp", "reset")
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "reject", "with", "icmp", "port-unreachable")
-    
-    // Explicit drop as final catch-all for the veth
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "drop")
-
-    return nil
+	return nil
 }
 
 func (s *Sandbox) Run(bin string, args []string) error {
