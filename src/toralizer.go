@@ -171,34 +171,37 @@ func (s *Sandbox) SetupNetwork() error {
 
 func (s *Sandbox) ApplyFirewall2() error {
     tableName := "toralizer"
-    runCmd("nft", "add", "table", "ip", tableName)
-
-    chainNat := fmt.Sprintf("pre-%s", s.ID)
-    runCmd("nft", "add", "chain", "ip", tableName, chainNat, "{ type nat hook prerouting priority -100; }")
-
-    // REDIRECTION LOGIC
-    // We target s.IPHost (10.200.0.1) because the Tor service on the host is 
-    // now listening on all interfaces (0.0.0.0).
     
-    // DNS Redirection
-    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorDNSPort))
+    // We use 'inet' table to allow the 'mangle' hook which can fix checksums
+    runCmd("nft", "add", "table", "inet", tableName)
 
-    // Transparent Proxy Redirection (TCP)
-    runCmd("nft", "add", "rule", "ip", tableName, chainNat, "iifname", s.VethHost, "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorTransPort))
+    // --- FIX CHECKSUMS ---
+    // This is the critical fix for the [bad udp cksum] error you saw in tcpdump.
+    // We set the UDP checksum to 0, which is technically valid in IPv4 for "no checksum".
+    chainMangle := fmt.Sprintf("mangle-%s", s.ID)
+    runCmd("nft", "add", "chain", "inet", tableName, chainMangle, "{ type filter hook prerouting priority -150; }")
+    runCmd("nft", "add", "rule", "inet", tableName, chainMangle, "iifname", s.VethHost, "udp", "dport", "53", "udp", "checksum", "set", "0")
 
-    // FILTERING LOGIC
-    chainFilter := fmt.Sprintf("in-%s", s.ID)
-    runCmd("nft", "add", "chain", "ip", tableName, chainFilter, "{ type filter hook input priority 0; }")
+    // --- NAT REDIRECTION ---
+    chainNat := fmt.Sprintf("nat-%s", s.ID)
+    runCmd("nft", "add", "chain", "inet", tableName, chainNat, "{ type nat hook prerouting priority -100; }")
+    
+    // DNS
+    runCmd("nft", "add", "rule", "inet", tableName, chainNat, "iifname", s.VethHost, "udp", "dport", "53", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorDNSPort))
+    // TCP
+    runCmd("nft", "add", "rule", "inet", tableName, chainNat, "iifname", s.VethHost, "tcp", "flags", "&", "(fin|syn|rst|ack)", "==", "syn", "dnat", "ip", "to", fmt.Sprintf("%s:%d", s.IPHost, s.Config.TorTransPort))
 
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "ct", "state", "established,related", "accept")
+    // --- FILTER INPUT ---
+    chainFilter := fmt.Sprintf("filter-%s", s.ID)
+    runCmd("nft", "add", "chain", "inet", tableName, chainFilter, "{ type filter hook input priority 0; }")
 
-    // Allow the specific redirected ports on the host's Veth IP
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "udp", "dport", fmt.Sprintf("%d", s.Config.TorDNSPort), "accept")
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "tcp", "dport", fmt.Sprintf("%d", s.Config.TorTransPort), "accept")
+    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "ct", "state", "established,related", "accept")
+    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "udp", "dport", fmt.Sprintf("%d", s.Config.TorDNSPort), "accept")
+    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "ip", "daddr", s.IPHost, "tcp", "dport", fmt.Sprintf("%d", s.Config.TorTransPort), "accept")
 
-    // Fail-Closed
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "reject", "with", "icmp", "port-unreachable")
-    runCmd("nft", "add", "rule", "ip", tableName, chainFilter, "iifname", s.VethHost, "drop")
+    // Final Drop
+    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "reject", "with", "icmp", "port-unreachable")
+    runCmd("nft", "add", "rule", "inet", tableName, chainFilter, "iifname", s.VethHost, "drop")
 
     return nil
 }
